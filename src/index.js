@@ -3,6 +3,7 @@ import cors from "cors";
 import dayjs from "dayjs";
 import { MongoClient } from "mongodb";
 import dotenv from "dotenv";
+import joi from "joi";
 
 dotenv.config();
 const server = express();
@@ -17,13 +18,18 @@ mongoClient.connect().then(() => {
     db = mongoClient.db("BatePapoUOL");
 });
 
+const participantSchema = joi.object({
+    name: joi.string().trim().required()
+})
+
 server.post("/participants", async (req, res) => {
     const { name } = req.body;
     const isNotValidName = await db.collection("participants").findOne({ name: name });
-    console.log(isNotValidName);
 
-    if (!name) {
-        res.status(422).send({ message: "não foi possível processar" });
+    const participantValidation = participantSchema.validate({ name });
+
+    if (participantValidation.error) {
+        res.status(422).send(participantValidation.error.details[0].message);
         return;
     }
 
@@ -32,12 +38,25 @@ server.post("/participants", async (req, res) => {
         return;
     }
 
+
+
+    const statusMessage = {
+        from: name,
+        to: "Todos",
+        text: "entra na sala...",
+        type: "status",
+        time: dayjs().format("HH:mm:ss")
+    }
+
     try {
         const response = await db.collection("participants").insertOne({
             name,
             lastStatus: Date.now()
         });
-        res.status(201).send(`Receita criada com id: ${response.insertedId}`)
+
+        await db.collection("messages").insertOne(statusMessage);
+
+        res.status(201).send(`Participante criado com id: ${response.insertedId}`);
     } catch (error) {
         res.sendStatus(500);
     }
@@ -52,27 +71,42 @@ server.get("/participants", async (req, res) => {
     }
 });
 
+
+
 server.post("/messages", async (req, res) => {
     const { to, text, type } = req.body;
     const { user } = req.headers;
 
-    const isValidType = type => type === "message" || type === "private_message";
+    const messageSchema = joi.object({
+        to: joi.string().invalid(user).required(),
+        text: joi.string().required(),
+        type: joi.string().valid("message", "private_message").required()
+    });
 
-    const isValidParticipant = await db.collection("participants").findOne({ name: user });
+    const messageValidation = messageSchema.validate({
+        to,
+        text,
+        type
+    }, { context: { user }, abortEarly: false });
 
-    const isValidMessage = (to, text, type, user) => to && to !== user && text && isValidType(type) && isValidParticipant;
+    if (messageValidation.error) {
+        const messages = messageValidation.error.details.map(detail => detail.message);
+        res.status(422).send(messages);
+        return;
+    };
 
-    if (!isValidMessage(to, text, type, user)) {
+    const isValidSender = await db.collection("participants").findOne({ name: user });
+    const isValidReceiver = await db.collection("participants").findOne({ name: to })
+
+    if (!isValidSender || !isValidReceiver) {
         res.sendStatus(422);
         return;
-    }
+    };
 
     try {
         const response = db.collection("messages").insertOne({
             from: user,
-            to,
-            text,
-            type,
+            ...messageValidation.value,
             time: dayjs().format("HH:mm:ss")
         });
         res.sendStatus(201);
@@ -83,16 +117,69 @@ server.post("/messages", async (req, res) => {
 
 server.get("/messages", async (req, res) => {
     const { user } = req.headers;
+    const limit = parseInt(req.query.limit);
 
-    const isAllowedMessage = message => message.type === 'message' || message.from === user || message.to === user;
+    const isAllowedMessage = message => message.type !== 'private_message' || message.from === user || message.to === user;
+
+    if (!limit) {
+        try {
+            const messages = await db.collection("messages").find().toArray();
+            res.status(201).send(messages.filter(isAllowedMessage));
+        } catch (error) {
+            res.sendStatus(500);
+        }
+        return;
+    };
 
     try {
         const messages = await db.collection("messages").find().toArray();
-        res.status(201).send(messages.filter(isAllowedMessage));
+        const alloweddMessages = messages.filter(isAllowedMessage);
+        const limitedMessages = alloweddMessages.slice(-limit);
+        res.status(201).send(limitedMessages);
     } catch (error) {
         res.sendStatus(500);
     }
 
-})
+});
 
-server.listen(5000, () => console.log("listening on port 5000"))
+server.post("/status", async (req, res) => {
+    const { user } = req.headers;
+
+    const isStoredUser = await db.collection("participants").findOne({ name: user });
+
+    if (!isStoredUser) {
+        res.sendStatus(404);
+        return;
+    }
+
+    try {
+        const response = await db.collection("participants").updateOne({ name: user }, { $set: { lastStatus: Date.now() } });
+        res.sendStatus(200);
+    } catch (error) {
+        res.sendStatus(500);
+    }
+});
+
+setInterval(async () => {
+    const participants = await db.collection("participants").find().toArray();
+    const inactiveParticipants = participants.filter(participant => Date.now() - Number(participant.lastStatus) > 1000);
+    inactiveParticipants.map(async value => {
+        console.log(value);
+        try {
+            const statusMessage = {
+                from: value.name,
+                to: "Todos",
+                text: "sai da sala...",
+                type: "status",
+                time: dayjs().format("HH:mm:ss")
+            }
+            await db.collection("participants").deleteOne(value);
+            await db.collection("messages").insertOne(statusMessage);
+        } catch (error) {
+            console.log("Deu ruim");
+        };
+    });
+
+}, 5000);
+
+server.listen(5000, () => console.log("listening on port 5000"));
