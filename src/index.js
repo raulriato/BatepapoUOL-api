@@ -87,7 +87,7 @@ server.post("/messages", async (req, res) => {
         to,
         text,
         type
-    }, { context: { user }, abortEarly: false });
+    }, { abortEarly: false });
 
     if (messageValidation.error) {
         const messages = messageValidation.error.details.map(detail => detail.message);
@@ -96,7 +96,7 @@ server.post("/messages", async (req, res) => {
     };
 
     const isValidSender = await db.collection("participants").findOne({ name: user });
-    const isValidReceiver = await db.collection("participants").findOne({ name: to })
+    const isValidReceiver = await db.collection("participants").findOne({ name: to }) || to.toLowerCase() === "todos";
 
     if (!isValidSender || !isValidReceiver) {
         res.sendStatus(422);
@@ -104,7 +104,7 @@ server.post("/messages", async (req, res) => {
     };
 
     try {
-        const response = db.collection("messages").insertOne({
+        await db.collection("messages").insertOne({
             from: user,
             ...messageValidation.value,
             time: dayjs().format("HH:mm:ss")
@@ -119,7 +119,7 @@ server.get("/messages", async (req, res) => {
     const { user } = req.headers;
     const limit = parseInt(req.query.limit);
 
-    const isAllowedMessage = message => message.type !== 'private_message' || message.from === user || message.to === user;
+    const isAllowedMessage = message => message.type !== "private_message" || message.from === user || message.to === user;
 
     if (!limit) {
         try {
@@ -161,11 +161,10 @@ server.post("/status", async (req, res) => {
 });
 
 setInterval(async () => {
-    const participants = await db.collection("participants").find().toArray();
-    const inactiveParticipants = participants.filter(participant => Date.now() - Number(participant.lastStatus) > 1000);
-    inactiveParticipants.map(async value => {
-        console.log(value);
-        try {
+    try {
+        const participants = await db.collection("participants").find().toArray();
+        const inactiveParticipants = participants.filter(participant => Date.now() - Number(participant.lastStatus) > 10000);
+        inactiveParticipants.forEach(async value => {
             const statusMessage = {
                 from: value.name,
                 to: "Todos",
@@ -175,11 +174,11 @@ setInterval(async () => {
             }
             await db.collection("participants").deleteOne(value);
             await db.collection("messages").insertOne(statusMessage);
-        } catch (error) {
-            console.log("Deu ruim");
-        };
-    });
+        })
+    } catch (error) {
+        console.error(error);
 
-}, 5000);
+    }
+}, 15000);
 
 server.listen(5000, () => console.log("listening on port 5000"));
